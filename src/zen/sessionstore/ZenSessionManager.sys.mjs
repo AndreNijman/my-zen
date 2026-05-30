@@ -737,21 +737,66 @@ export class nsZenSessionManager {
     return tabData && !(tabData.zenIsEmpty && !tabData.groupId);
   }
 
+  /**
+   * Whether a tab copy still carries restorable session history. A synced
+   * copy that has not loaded yet (a lazy mirror tab, or one whose cached
+   * history is still empty) has no real entry, so restoring from it would
+   * bring the tab back blank instead of on the page the user left.
+   *
+   * @param {object} tabData - The tab data object to evaluate.
+   * @returns {boolean} True if the tab data has restorable session history.
+   */
+  #tabHasRestorableState(tabData) {
+    return !!tabData.entries?.some(
+      entry => entry?.url && entry.url !== "about:blank"
+    );
+  }
+
+  /**
+   * Decides whether a freshly seen copy of a synced tab should replace the
+   * one we already collected for its sync id. We keep whichever copy still
+   * has its session state, and only fall back to preferring the active tab
+   * when both copies are equally complete.
+   *
+   * @param {object} aCandidate - The newly seen tab data.
+   * @param {object} aCurrent - The tab data already stored for this sync id.
+   * @returns {boolean} True if the candidate should replace the current copy.
+   */
+  #shouldReplaceCollectedTab(aCandidate, aCurrent) {
+    const candidateHasState = this.#tabHasRestorableState(aCandidate);
+    const currentHasState = this.#tabHasRestorableState(aCurrent);
+    if (candidateHasState !== currentHasState) {
+      return candidateHasState;
+    }
+    return !!aCandidate._zenIsActiveTab;
+  }
+
+  /**
+   * Returns the de-duplicated set of tabs that a save would keep for the
+   * given window states, without writing anything. Wraps the private
+   * collection so the keep/replace decision can be exercised on its own.
+   *
+   * @param {object} aStateWindows The array of window state objects.
+   * @returns {Array} The de-duplicated tab data.
+   */
+  collectUsedTabs(aStateWindows) {
+    return this.#collectUsedTabsFromWindows(aStateWindows);
+  }
+
   #collectUsedTabsFromWindows(aStateWindows) {
     const tabIdRelationMap = new Map();
     for (const window of aStateWindows) {
-      // Only accept the tabs with `_zenIsActiveTab` set to true from
-      // every window. We do this to avoid collecting tabs with invalid
-      // state when multiple windows are open. Note that if we a tab without
-      // this flag set in any other window, we just add it anyway.
+      // Prefer the active copy of each synced tab, but never let a copy that
+      // has lost its history overwrite one that still has it. A copy that was
+      // just synced into another window can report empty entries until it is
+      // flushed, and letting it win here would push that blank copy into every
+      // window on the next restore.
       for (const tabData of window.tabs || []) {
         if (!this.#shouldCollectTab(tabData)) {
           continue;
         }
-        if (
-          !tabIdRelationMap.has(tabData.zenSyncId) ||
-          tabData._zenIsActiveTab
-        ) {
+        const current = tabIdRelationMap.get(tabData.zenSyncId);
+        if (!current || this.#shouldReplaceCollectedTab(tabData, current)) {
           tabIdRelationMap.set(tabData.zenSyncId, tabData);
         }
       }
